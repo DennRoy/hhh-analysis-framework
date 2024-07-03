@@ -58,6 +58,32 @@ if do_SR and do_CR :
     print("You should chose to signal region OR control region")
     exit()
 
+isRemote = False
+if input_tree.startswith("/store"):
+    isRemote = True
+    import subprocess
+    if "dmroy" in input_tree:
+        prefix = 'davs://cmsxrootd.hep.wisc.edu:1094/'
+    else:
+        import socket
+        host = socket.getfqdn()
+        if 'cern.ch' in host:
+            prefix = 'root://xrootd-cms.infn.it//'
+        else:
+            prefix = 'root://cmseos.fnal.gov//'
+    def GetFromGfal(command):
+        #print(">>> "+command)
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        out = ""
+        for line in iter(process.stdout.readline,b""):
+            if isinstance(line,bytes):
+                line = line.decode('utf-8')
+            out += line
+        process.stdout.close()
+        retcode = process.wait()
+        out = out.strip()
+        return out
+
 selections = {
     #"final_selection_jetMultiplicity" : "(nbtags > 4 && nfatjets == 0) || (nbtags > 2 && nfatjets > 0)",
 
@@ -1027,10 +1053,10 @@ selections = {
         },
 
         "test"              : {
-        "sel" : "(nsmalljets >= 4)",
+        "sel" : "(1.0)",
         "label" : "ProbHHH ",
-        "doSR" : "&& nprobejets > 0",
-        "doCR" : "&&  nprobejets == 0",
+        "doSR" : "&& (1.0)",#"&& (nprobejets > 0 || nprobetaus > 0)",
+        "doCR" : "&& nprobejets == 0 && nprobetaus == 0",
         "dataset" : "-weights",
         },
 
@@ -1102,11 +1128,23 @@ for selection in selections.keys() :
 
   print("Doing tree skimmed for %s_%s" % (selection, additional_label))
   print(final_selection)
-  output_folder = "{}/{}_{}".format(input_tree,selection,additional_label)
-  if not path.exists(output_folder) :
-      procs=subprocess.Popen(['mkdir %s' % output_folder],shell=True,stdout=subprocess.PIPE)
-      out = procs.stdout.read()
-      print("made directory %s" % output_folder)
+  if not isRemote:
+      output_folder = "{}/{}_{}".format(input_tree,selection,additional_label)
+      if not path.exists(output_folder) :
+          procs=subprocess.Popen(['mkdir %s' % output_folder],shell=True,stdout=subprocess.PIPE)
+          out = procs.stdout.read()
+          print("made directory %s" % output_folder)
+  else:
+      tmp_path = os.getenv("TMPDIR")
+      output_folder = "{}/{}_{}".format(prefix+input_tree,selection,additional_label)
+      cmd = "(eval $(scram unsetenv -sh); gfal-mkdir {output} -p)".format(output=output_folder)
+      process = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,shell=True)
+      log = process.communicate()[0]
+      tmp_folder = "{}/{}_{}".format(tmp_path,selection,additional_label)
+      if not path.exists(tmp_folder) :
+          procs=subprocess.Popen(['mkdir %s' % tmp_folder],shell=True,stdout=subprocess.PIPE)
+          out = procs.stdout.read()
+          print("made directory %s" % tmp_folder)
 
   if not skip_do_trees :
 
@@ -1121,11 +1159,15 @@ for selection in selections.keys() :
         else:
             datahist = 'BTagCSV'
 
-    outtree = os.path.join(input_tree, selection+"_"+additional_label, proctodo+".root")
-
     dataset = selections[selection]["dataset"] # inclusive_resolved or inclusive_boosted
     subdir = "inclusive"+dataset if dataset.startswith("-") else "inclusive_"+dataset
-    list_proc=glob.glob(os.path.join(input_tree, subdir, datahist+"*.root"))
+    if not isRemote:
+        outtree = os.path.join(input_tree, selection+"_"+additional_label, proctodo+".root")
+        list_proc=glob.glob(os.path.join(input_tree, subdir, datahist+"*.root"))
+    else:
+        outtree = os.path.join(tmp_path, selection+"_"+additional_label, proctodo+".root")
+        files = GetFromGfal("(eval $(scram unsetenv -sh); gfal-ls {path} -l)".format(path=os.path.join(prefix+input_tree, subdir))).split()
+        list_proc = [os.path.join(prefix+input_tree, subdir, f) for f in files if f.startswith(datahist) and f.endswith(".root")]
     if list_proc == []: continue
     print("Will create %s" % outtree)
 
@@ -1146,7 +1188,13 @@ for selection in selections.keys() :
         print("Cutting tree and saving it to ", thisouttree)
         print("With selection: ", final_selection)
 
-        chunk_df = ROOT.RDataFrame(inputTree, proc)
+        if not isRemote:
+            chunk_df = ROOT.RDataFrame(inputTree, proc)
+        else:
+            cmd = "(eval $(scram unsetenv -sh); gfal-copy {f_in} {tmpdir})".format(f_in=proc, tmpdir=tmp_path)
+            process = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,shell=True)
+            log = process.communicate()[0]
+            chunk_df = ROOT.RDataFrame(inputTree, os.path.join(tmp_path, os.path.basename(proc)))
         chunk_df = chunk_df.Define('ProbMultiH','ProbHHH + ProbHHH4b2tau + ProbHH4b + ProbHH2b2tau')
         chunk_df = chunk_df.Define('IndexMaxProb', 'get_max_prob(ProbHHH, ProbQCD, ProbTT, ProbVJets, ProbVV, ProbHHH4b2tau, ProbHH4b, ProbHH2b2tau)')
         chunk_df = chunk_df.Define('IndexMaxCat', 'get_max_cat(Prob3bh0h, Prob2bh1h, Prob1bh2h, Prob0bh3h, Prob2bh0h, Prob1bh1h, Prob0bh2h, Prob1bh0h, Prob0bh1h, Prob0bh0h)')
@@ -1237,7 +1285,7 @@ for selection in selections.keys() :
         print( "Redefine eventWeight = {}".format(string_multiply))
         lumi = luminosities[year]
         # Re-definition of event weight to be used on v28 - will be fixed
-        if 'JetHT' in datahist: cutWeight = '1' 
+        if 'JetHT' in datahist or 'JetMET' in datahist: cutWeight = '1' 
         else: cutWeight = '(%f * xsecWeight * l1PreFiringWeight * puWeight * genWeight * triggerSF)'%(lumi)
         chunk_df = chunk_df.Define('eventWeight2', cutWeight)
         chunk_df = chunk_df.Define('totalWeight', string_multiply)
@@ -1262,17 +1310,24 @@ for selection in selections.keys() :
         gc.collect() # clean menory
         sys.stdout.flush() # extra clean
 
+        if isRemote:
+            cmd = "(eval $(scram unsetenv -sh); gfal-copy {tmpdir} {f_out})".format(tmpdir=thisouttree, f_out=os.path.join(prefix+input_tree, selection+"_"+additional_label))
+            process = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,shell=True)
+            log = process.communicate()[0]
+            os.remove(os.path.join(tmp_path, os.path.basename(proc)))
+            os.remove(thisouttree)
+
         seconds = time.time()
         print("Seconds to load : ", seconds-seconds0)
         print("Minutes to load : ", (seconds-seconds0)/60.0)
 
-  ## do Histograms -- reorganize to do directly limits
-  output_histos = "{}/{}_{}/histograms".format(input_tree,selection,additional_label)
-  if not path.exists(output_histos) :
-    procs=subprocess.Popen(['mkdir %s' % output_histos],shell=True,stdout=subprocess.PIPE)
-    out = procs.stdout.read()
-
   if not skip_do_histograms : # args.doHistograms:
+    ## do Histograms -- reorganize to do directly limits
+    output_histos = "{}/{}_{}/histograms".format(input_tree,selection,additional_label)
+    if not path.exists(output_histos) :
+      procs=subprocess.Popen(['mkdir %s' % output_histos],shell=True,stdout=subprocess.PIPE)
+      out = procs.stdout.read()
+
     ## already doing plots, will do histogram file only to the chosen variable
     seconds0 = time.time()
     #histograms = []

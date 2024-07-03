@@ -45,13 +45,51 @@ cutlist = {
 
 #cut_boosted = '(nprobejets > -1)'
 
-for cut in cutlist:
-    if not os.path.isdir(output + '/' + cutlist[cut][0]):
-        print("Creating %s"%(output + '/' + cutlist[cut][0]))
-        os.makedirs(output + '/' + cutlist[cut][0])
+isRemote = False
+if path.startswith("/store"):
+    isRemote = True
+    import subprocess
+    if "dmroy" in path:
+        prefix = 'davs://cmsxrootd.hep.wisc.edu:1094/'
+    else:
+        import socket
+        host = socket.getfqdn()
+        if 'cern.ch' in host:
+            prefix = 'root://xrootd-cms.infn.it//'
+        else:
+            prefix = 'root://cmseos.fnal.gov//'
+    def GetFromGfal(command):
+        #print(">>> "+command)
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1)
+        out = ""
+        for line in iter(process.stdout.readline,b""):
+            if isinstance(line,bytes):
+                line = line.decode('utf-8')
+            out += line
+        process.stdout.close()
+        retcode = process.wait()
+        out = out.strip()
+        return out
 
-files = glob.glob(path + '/' + '*.root')
+for cut in cutlist:
+    if not isRemote:
+        if not os.path.isdir(output + '/' + cutlist[cut][0]):
+            print("Creating %s"%(output + '/' + cutlist[cut][0]))
+            os.makedirs(output + '/' + cutlist[cut][0])
+    else:
+        cmd = "(eval $(scram unsetenv -sh); gfal-mkdir {output} -p)".format(output=os.path.join(prefix+output, cutlist[cut][0]))
+        print("Creating %s"%(prefix+output + '/' + cutlist[cut][0]))
+        process = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,shell=True)
+        log = process.communicate()[0]
+
 if args.f_in!='': files = [args.f_in]
+elif not isRemote:
+    files = glob.glob(path + '/' + '*.root')
+else:
+    files = []
+    for kind in ["data", "mc", "signal"]:
+        thisfiles = GetFromGfal("(eval $(scram unsetenv -sh); gfal-ls {path})".format(path=prefix+path.replace("*", kind)))
+        files += [os.path.join(prefix+path.replace("*", kind), f) for f in thisfiles.split() if f.endswith(".root")]
 
 first = True
 
@@ -81,7 +119,25 @@ for f_in in files:
     f_name = os.path.basename(f_in)
     print(f_name)
 
-    df = ROOT.RDataFrame('Events',f_in)
+    isDone = True
+    for cut in cutlist:
+        if not isRemote:
+            if not os.path.isfile( output + '/' + cutlist[cut][0] + '/' + f_name): isDone = False
+        else:
+            thisfiles = GetFromGfal("(eval $(scram unsetenv -sh); gfal-ls {output})".format(output=os.path.join(prefix+output, cutlist[cut][0], f_name)))
+            if thisfiles.split()[0]!=os.path.join(prefix+output, cutlist[cut][0], f_name): isDone = False
+    if isDone: continue
+
+    if not isRemote:
+        df = ROOT.RDataFrame('Events',f_in)
+    else:
+        tmpdir = os.getenv("TMPDIR")
+        cmd = "(eval $(scram unsetenv -sh); gfal-copy {f_in} {tmpdir})".format(f_in=f_in, tmpdir=os.path.join(tmpdir, f_name.replace(".root", "_in.root")))
+        print(cmd)
+        process = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,shell=True)
+        log = process.communicate()[0]
+        f_in = os.path.join(tmpdir, f_name.replace(".root", "_in.root"))
+        df = ROOT.RDataFrame('Events',f_in)
 
     print(path+'/'+f_name)
     #df = ROOT.RDataFrame('Events',f_in)
@@ -122,27 +178,40 @@ for f_in in files:
 
     df = add_bdt(df,year)
     df = add_bdt_boosted(df,year)
-    if 'JetHT' not in f_in and 'BTagCSV' not in f_in and 'SingleMuon' not in f_in:
+    if 'JetHT' not in f_in and 'JetMET' not in f_in and 'BTagCSV' not in f_in and 'SingleMuon' not in f_in:
         df = matching_variables(df)
 
     #df = df.Define('ProbMultiH','ProbHHH + ProbHH4b + ProbHHH4b2tau + ProbHH2b2tau')
 
     dfs = {}
-    for cut in cutlist:
-        dfs[cut] = df.Filter(cutlist[cut][1])
-
     print("Running on %s"%f_in)
     #to_save = [str(el) for el in df_boosted.GetColumnNames() if 'L1_' not in str(el) and 'v_' not in str(el) and 'MassRegressed' not in str(el) and 'bcand' not in str(el) and 'boostedTau_' not in str(el) and 'PNet' not in str(el)]
-
     for cut in cutlist:
         print("Doing", cut, "for", f_name)
-        if os.path.isfile( output + '/' + cutlist[cut][0] + '/' + f_name): continue
+        if not isRemote:
+            if os.path.isfile( output + '/' + cutlist[cut][0] + '/' + f_name): continue
+        else:
+            thisfiles = GetFromGfal("(eval $(scram unsetenv -sh); gfal-ls {output})".format(output=os.path.join(prefix+output, cutlist[cut][0], f_name)))
+            if thisfiles.split()[0]==os.path.join(prefix+output, cutlist[cut][0], f_name): continue
+
+        dfs[cut] = df.Filter(cutlist[cut][1])
 
         to_save = [str(el) for el in dfs[cut].GetColumnNames() if 'L1_' not in str(el) and 'v_' not in str(el) and 'MassRegressed' not in str(el) and 'bcand' not in str(el) and 'boostedTau_' not in str(el) and 'LHE' not in str(el)]
         print(to_save)
         print(len(to_save))
 
-        dfs[cut].Snapshot('Events', output + '/' + cutlist[cut][0] + '/' + f_name, to_save)
+        if not isRemote:
+            dfs[cut].Snapshot('Events', output + '/' + cutlist[cut][0] + '/' + f_name, to_save)
+        else:
+            dfs[cut].Snapshot('Events', os.path.join(tmpdir, f_name), to_save)
+            cmd = "(eval $(scram unsetenv -sh); gfal-copy {tmpfile} {output})".format(tmpfile=os.path.join(tmpdir, f_name), output=os.path.join(prefix+output, cutlist[cut][0], f_name))
+            process = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,shell=True)
+            log = process.communicate()[0]
+            os.remove(os.path.join(tmpdir, f_name))
+        del dfs[cut]
+    if isRemote:
+        os.remove(os.path.join(tmpdir, f_name.replace(".root", "_in.root")))
+            
 
 
     #print(save_variables + ['eventWeight']+masses+pts+etas+phis+drs)

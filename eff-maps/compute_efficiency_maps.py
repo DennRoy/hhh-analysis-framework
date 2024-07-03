@@ -14,7 +14,7 @@ wps = { 'loose' : {'2016APV': 0.0508, '2016': 0.0480, '2016PostAPV': 0.0480,'201
 
 f_in = 'QCD'
 year = '2017'
-version = 'v24'
+version = 'v27-spanet-boosted-variables'
 
 for year in ['2016APV','2016','2017','2018']:
     for f_in in ['QCD_bEnriched','GluGluToHHHTo6B_SM','QCD','TT','WJetsToQQ','WWTo4Q','WWW','WWZ','WZZ','ZJetsToQQ','ZZTo4Q','ZZZ']:
@@ -22,8 +22,8 @@ for year in ['2016APV','2016','2017','2018']:
 
         f_out = ROOT.TFile(year+'/'+'EffMap_%s.root'%f_in,'recreate')
 
-        repo = 'samples-%s-%s-nanoaod'%(version,year)
-        path = '/isilon/data/users/mstamenk/eos-triple-h/' + repo + '/'
+        repo = '%s/mva-inputs-%s/inclusive_resolved-weights'%(version,year)
+        path = '/eos/user/m/mstamenk/CxAOD31run/hhh-6b/' + repo + '/'
 
         df = ROOT.ROOT.RDataFrame('Events', path  +  '/' + f_in + '.root')
 
@@ -34,7 +34,7 @@ for year in ['2016APV','2016','2017','2018']:
         else:
             cutWeight = '(%f * weight * xsecWeight * l1PreFiringWeight * puWeight * genWeight)'%(lumi)
 
-        df = df.Define('eventWeight',cutWeight)
+        #df = df.Define('eventWeight',cutWeight)
 
         df = df.Define('jet1AbsEta', 'abs(jet1Eta)')
         df = df.Define('jet2AbsEta', 'abs(jet2Eta)')
